@@ -1,4 +1,4 @@
-C-UART Interface Example
+Go-UART Interface Example
 ========================
 
 This is a simple MAVLink to UART interface example for *nix systems that can allow communication between Pixhawk and an offboard computer.
@@ -10,7 +10,7 @@ Building
 ========
 
 ```
-$ cd c_uart_interface_example/
+$ cd go_uart_interface_example/
 $ make
 ```
 
