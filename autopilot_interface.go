@@ -150,6 +150,321 @@ func SetAcceleration(ax, ay, az float, sp *mavlink_set_position_target_local_ned
 	sp.afy  = ay;
 	sp.afz  = az;
 }
+
+func SetYaw(yaw float, sp *mavlink_set_position_target_local_ned_t)
+{
+	sp.type_mask &=
+		MAVLINK_MSG_SET_POSITION_TARGET_LOCAL_NED_YAW_ANGLE ;
+
+	sp.yaw  = yaw;
+
+	printf("POSITION SETPOINT YAW = %.4f \n", sp.yaw);
+
+}
+
+func SetYawRate(yaw_rate float, sp *mavlink_set_position_target_local_ned_t)
+{
+	sp.type_mask &=
+		MAVLINK_MSG_SET_POSITION_TARGET_LOCAL_NED_YAW_RATE ;
+
+	sp.yaw_rate  = yaw_rate;
+}
+
+
+func (a *Autopilot_Interface) Start() {
+	int result;
+
+	// --------------------------------------------------------------------------
+	//   CHECK SERIAL PORT
+	// --------------------------------------------------------------------------
+
+	if ( not serial_port->status == 1 ) // SERIAL_PORT_OPEN
+	{
+		fprintf(stderr,"ERROR: serial port not open\n");
+		throw 1;
+	}
+
+
+	// --------------------------------------------------------------------------
+	//   READ THREAD
+	// --------------------------------------------------------------------------
+
+	printf("START READ THREAD \n");
+
+	go start_autopilot_interface_read_thread()
+	result = pthread_create( &read_tid, NULL, &start_autopilot_interface_read_thread, this );
+	if ( result ) throw result;
+
+	// now we're reading messages
+	printf("\n");
+
+
+	// --------------------------------------------------------------------------
+	//   CHECK FOR MESSAGES
+	// --------------------------------------------------------------------------
+
+	printf("CHECK FOR MESSAGES\n");
+
+	while ( not current_messages.sysid )
+	{
+		if ( time_to_exit )
+			return;
+		usleep(500000); // check at 2Hz
+	}
+
+	printf("Found\n");
+
+	// now we know autopilot is sending messages
+	printf("\n");
+
+
+	// --------------------------------------------------------------------------
+	//   GET SYSTEM and COMPONENT IDs
+	// --------------------------------------------------------------------------
+
+	// This comes from the heartbeat, which in theory should only come from
+	// the autopilot we're directly connected to it.  If there is more than one
+	// vehicle then we can't expect to discover id's like this.
+	// In which case set the id's manually.
+
+	// System ID
+	if ( not system_id )
+	{
+		system_id = current_messages.sysid;
+		printf("GOT VEHICLE SYSTEM ID: %i\n", system_id );
+	}
+
+	// Component ID
+	if ( not autopilot_id )
+	{
+		autopilot_id = current_messages.compid;
+		printf("GOT AUTOPILOT COMPONENT ID: %i\n", autopilot_id);
+		printf("\n");
+	}
+
+
+	// --------------------------------------------------------------------------
+	//   GET INITIAL POSITION
+	// --------------------------------------------------------------------------
+
+	// Wait for initial position ned
+	while ( not ( current_messages.time_stamps.local_position_ned &&
+				  current_messages.time_stamps.attitude            )  )
+	{
+		if ( time_to_exit )
+			return;
+		usleep(500000);
+	}
+
+	// copy initial position ned
+	Mavlink_Messages local_data = current_messages;
+	initial_position.x        = local_data.local_position_ned.x;
+	initial_position.y        = local_data.local_position_ned.y;
+	initial_position.z        = local_data.local_position_ned.z;
+	initial_position.vx       = local_data.local_position_ned.vx;
+	initial_position.vy       = local_data.local_position_ned.vy;
+	initial_position.vz       = local_data.local_position_ned.vz;
+	initial_position.yaw      = local_data.attitude.yaw;
+	initial_position.yaw_rate = local_data.attitude.yawspeed;
+
+	printf("INITIAL POSITION XYZ = [ %.4f , %.4f , %.4f ] \n", initial_position.x, initial_position.y, initial_position.z);
+	printf("INITIAL POSITION YAW = %.4f \n", initial_position.yaw);
+	printf("\n");
+
+	// we need this before starting the write thread
+
+
+	// --------------------------------------------------------------------------
+	//   WRITE THREAD
+	// --------------------------------------------------------------------------
+	printf("START WRITE THREAD \n");
+
+	result = pthread_create( &write_tid, NULL, &start_autopilot_interface_write_thread, this );
+	if ( result ) throw result;
+
+	// wait for it to be started
+	while ( not writing_status )
+		usleep(100000); // 10Hz
+
+	// now we're streaming setpoint commands
+	printf("\n");
+
+
+	// Done!
+	return;
+
+}
+
+func (a *Autopilot_Interface) UpdateSetpoint(setpoint mavlink_set_position_target_local_ned_t)
+{
+	a.current_setpoint = setpoint;
+}
+
+func (a *Autopilot_Interface) ReadMessages()
+{
+	bool success;               // receive success flag
+	bool received_all = false;  // receive only one message
+	Time_Stamps this_timestamps;
+
+	// Blocking wait for new data
+	while ( not received_all and not time_to_exit )
+	{
+		// ----------------------------------------------------------------------
+		//   READ MESSAGE
+		// ----------------------------------------------------------------------
+		mavlink_message_t message;
+		success = serial_port->read_message(message);
+
+		// ----------------------------------------------------------------------
+		//   HANDLE MESSAGE
+		// ----------------------------------------------------------------------
+		if( success )
+		{
+
+			// Store message sysid and compid.
+			// Note this doesn't handle multiple message sources.
+			current_messages.sysid  = message.sysid;
+			current_messages.compid = message.compid;
+
+			// Handle Message ID
+			switch (message.msgid)
+			{
+
+				case MAVLINK_MSG_ID_HEARTBEAT:
+				{
+					//printf("MAVLINK_MSG_ID_HEARTBEAT\n");
+					mavlink_msg_heartbeat_decode(&message, &(current_messages.heartbeat));
+					current_messages.time_stamps.heartbeat = get_time_usec();
+					this_timestamps.heartbeat = current_messages.time_stamps.heartbeat;
+					break;
+				}
+
+				case MAVLINK_MSG_ID_SYS_STATUS:
+				{
+					//printf("MAVLINK_MSG_ID_SYS_STATUS\n");
+					mavlink_msg_sys_status_decode(&message, &(current_messages.sys_status));
+					current_messages.time_stamps.sys_status = get_time_usec();
+					this_timestamps.sys_status = current_messages.time_stamps.sys_status;
+					break;
+				}
+
+				case MAVLINK_MSG_ID_BATTERY_STATUS:
+				{
+					//printf("MAVLINK_MSG_ID_BATTERY_STATUS\n");
+					mavlink_msg_battery_status_decode(&message, &(current_messages.battery_status));
+					current_messages.time_stamps.battery_status = get_time_usec();
+					this_timestamps.battery_status = current_messages.time_stamps.battery_status;
+					break;
+				}
+
+				case MAVLINK_MSG_ID_RADIO_STATUS:
+				{
+					//printf("MAVLINK_MSG_ID_RADIO_STATUS\n");
+					mavlink_msg_radio_status_decode(&message, &(current_messages.radio_status));
+					current_messages.time_stamps.radio_status = get_time_usec();
+					this_timestamps.radio_status = current_messages.time_stamps.radio_status;
+					break;
+				}
+
+				case MAVLINK_MSG_ID_LOCAL_POSITION_NED:
+				{
+					//printf("MAVLINK_MSG_ID_LOCAL_POSITION_NED\n");
+					mavlink_msg_local_position_ned_decode(&message, &(current_messages.local_position_ned));
+					current_messages.time_stamps.local_position_ned = get_time_usec();
+					this_timestamps.local_position_ned = current_messages.time_stamps.local_position_ned;
+					break;
+				}
+
+				case MAVLINK_MSG_ID_GLOBAL_POSITION_INT:
+				{
+					//printf("MAVLINK_MSG_ID_GLOBAL_POSITION_INT\n");
+					mavlink_msg_global_position_int_decode(&message, &(current_messages.global_position_int));
+					current_messages.time_stamps.global_position_int = get_time_usec();
+					this_timestamps.global_position_int = current_messages.time_stamps.global_position_int;
+					break;
+				}
+
+				case MAVLINK_MSG_ID_POSITION_TARGET_LOCAL_NED:
+				{
+					//printf("MAVLINK_MSG_ID_POSITION_TARGET_LOCAL_NED\n");
+					mavlink_msg_position_target_local_ned_decode(&message, &(current_messages.position_target_local_ned));
+					current_messages.time_stamps.position_target_local_ned = get_time_usec();
+					this_timestamps.position_target_local_ned = current_messages.time_stamps.position_target_local_ned;
+					break;
+				}
+
+				case MAVLINK_MSG_ID_POSITION_TARGET_GLOBAL_INT:
+				{
+					//printf("MAVLINK_MSG_ID_POSITION_TARGET_GLOBAL_INT\n");
+					mavlink_msg_position_target_global_int_decode(&message, &(current_messages.position_target_global_int));
+					current_messages.time_stamps.position_target_global_int = get_time_usec();
+					this_timestamps.position_target_global_int = current_messages.time_stamps.position_target_global_int;
+					break;
+				}
+
+				case MAVLINK_MSG_ID_HIGHRES_IMU:
+				{
+					//printf("MAVLINK_MSG_ID_HIGHRES_IMU\n");
+					mavlink_msg_highres_imu_decode(&message, &(current_messages.highres_imu));
+					current_messages.time_stamps.highres_imu = get_time_usec();
+					this_timestamps.highres_imu = current_messages.time_stamps.highres_imu;
+					break;
+				}
+
+				case MAVLINK_MSG_ID_ATTITUDE:
+				{
+					//printf("MAVLINK_MSG_ID_ATTITUDE\n");
+					mavlink_msg_attitude_decode(&message, &(current_messages.attitude));
+					current_messages.time_stamps.attitude = get_time_usec();
+					this_timestamps.attitude = current_messages.time_stamps.attitude;
+					break;
+				}
+
+				default:
+				{
+					// printf("Warning, did not handle message id %i\n",message.msgid);
+					break;
+				}
+
+
+			} // end: switch msgid
+
+		} // end: if read message
+
+		// Check for receipt of all items
+		received_all =
+				this_timestamps.heartbeat                  &&
+				this_timestamps.sys_status                 &&
+//				this_timestamps.battery_status             &&
+//				this_timestamps.radio_status               &&
+				this_timestamps.local_position_ned         &&
+//				this_timestamps.global_position_int        &&
+//				this_timestamps.position_target_local_ned  &&
+				this_timestamps.position_target_global_int &&
+				this_timestamps.highres_imu                &&
+				this_timestamps.attitude                   ;
+
+		// give the write thread time to use the port
+		if ( writing_status > false )
+			usleep(100); // look for components of batches at 10kHz
+
+	} // end: while not received all
+
+	return;
+}
+
+func (a *Autopilot_Interface) ReadMessages(message mavlink_message_t)
+{
+	// do the write
+	int len = serial_port->write_message(message);
+
+	// book keep
+	write_count++;
+
+	// Done!
+	return len;
+}
+
 // ----------------------------------------------------------------------------------
 //   Setpoint Helper Functions
 // ----------------------------------------------------------------------------------
