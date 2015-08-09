@@ -170,6 +170,22 @@ func SetYawRate(yaw_rate float, sp *mavlink_set_position_target_local_ned_t)
 	sp.yaw_rate  = yaw_rate;
 }
 
+type Autopilot_Interface struct {
+	Reading_status uint8
+	Writing_status uint8
+	Contorl_status uint8
+	Write_count uint64
+
+	System_id, autopilot_id, companion_id int 
+	Current_messages Mavlink_Messages 
+	Initial_position mavlink_set_position_target_local_ned_t
+
+	serial_port *Serial_Port
+	time_to_exit bool
+
+	current_setpoint mavlink_set_position_target_local_ned_t
+	
+}
 
 func (a *Autopilot_Interface) Start() {
 	int result;
@@ -463,6 +479,47 @@ func (a *Autopilot_Interface) ReadMessages(message mavlink_message_t)
 
 	// Done!
 	return len;
+}
+
+
+type Mavlink_Message {
+	sysid, compid int 
+
+	// Heartbeat
+	heartbeat mavlink_heartbeat_t
+
+	// System Status
+	sys_status mavlink_sys_status_t
+
+	// Battery Status
+	battery_status mavlink_battery_status_t
+
+	// Radio Status
+	radio_status mavlink_radio_status_t
+
+	// Local Position
+	local_position_ned mavlink_local_position_ned_t
+
+	// Global Position
+	global_position_int mavlink_global_position_int_t
+
+	// Local Position Target
+	position_target_local_ned mavlink_position_target_local_ned_t
+
+	// Global Position Target
+	position_target_global_int mavlink_position_target_global_int_t
+
+	// HiRes IMU
+	highres_imu mavlink_highres_imu_t
+
+	// Attitude
+	attitude mavlink_attitude_t
+
+	time_stamps Time_Stamps
+}
+
+func (m *Mavlink_Message) reset_timestamps(){
+	m.time_stamps.reset_timestamps()
 }
 
 // ----------------------------------------------------------------------------------
